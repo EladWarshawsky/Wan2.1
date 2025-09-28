@@ -14,6 +14,7 @@ import torch
 import torch.distributed as dist
 from wan.device_utils import get_optimal_device, get_current_device
 from PIL import Image
+from easydict import EasyDict
 
 import wan
 from wan.configs import MAX_AREA_CONFIGS, SIZE_CONFIGS, SUPPORTED_SIZES, WAN_CONFIGS
@@ -337,8 +338,8 @@ def generate(args):
     # Build config, optionally enabling FreeLong++
     if args.use_freelong:
         logging.info("FreeLong++ mode enabled. Preparing dynamic configuration.")
-        # Start with the base config for the selected task
-        cfg = WAN_CONFIGS[args.task].copy()
+        # Start with the base config for the selected task; ensure EasyDict
+        cfg = EasyDict(WAN_CONFIGS[args.task])
 
         # Define the multi-band scales based on desired output length
         if args.frame_num > 500:  # 8x generation (e.g., 648 frames)
@@ -351,9 +352,9 @@ def generate(args):
         logging.info(f"Generating {args.frame_num} frames. Using FreeLong++ alphas: {alphas}")
 
         # Inject the FreeLong++ configuration into the model config object
-        cfg['freelong_cfg'] = {
+        cfg.freelong_cfg = {
             "alphas": alphas,
-            "native_length": 81,
+            "native_length": 81,  # Wan2.1 native length is 81 frames
         }
     else:
         cfg = WAN_CONFIGS[args.task]

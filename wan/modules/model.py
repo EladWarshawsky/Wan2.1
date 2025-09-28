@@ -1,4 +1,5 @@
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
+import logging
 import math
 
 import torch
@@ -172,8 +173,11 @@ class WanSelfAttention(nn.Module):
                 sparse_indices.append(torch.arange(start, end, device=x.device))
             if len(sparse_indices) > 0:
                 sparse_indices = torch.cat(sparse_indices)
-                k_rope = k_rope[:, sparse_indices, :, :]
-                v = v[:, sparse_indices, :, :]
+                k_sparse = k_rope[:, sparse_indices, :, :]
+                v_sparse = v[:, sparse_indices, :, :]
+                logging.info(f"[FreeLong++] Global branch on long video detected. Activating SPARSE attention. Original K shape: {tuple(k_rope.shape)}, Sparse K shape: {tuple(k_sparse.shape)}")
+                k_rope = k_sparse
+                v = v_sparse
                 # k_lens must reflect K length; setting None lets attention_impl handle varlen
                 k_lens_arg = None
 
@@ -372,8 +376,11 @@ class FreeLongPlusPlusWanAttentionBlock(WanAttentionBlock):
         return {k: v.to(device, dtype=torch.float32) for k, v in self.band_pass_filters.items()}
 
     def multi_band_spectral_fusion(self, features_list, grid_sizes):
-        b, l, c = features_list[0].shape
+        logging.info("[FreeLong++] --- Entering Multi-Band Spectral Fusion ---")
+        logging.info(f"[FreeLong++] Fusing features from {len(features_list)} branches.")
         f, h, w = grid_sizes[0].tolist()
+        logging.info(f"[FreeLong++] Reshaping tokens to 3D Volume: (Frames={f}, Height={h}, Width={w})")
+        b, l, c = features_list[0].shape
 
         fused_spectral = torch.zeros((b, c, f, h, w), device=features_list[0].device, dtype=torch.complex64)
 
@@ -407,6 +414,7 @@ class FreeLongPlusPlusWanAttentionBlock(WanAttentionBlock):
 
         # Reshape back to the model's expected flattened format
         combined_feat = rearrange(combined_video, 'b c f h w -> b (f h w) c')
+        logging.info(f"[FreeLong++] Spectral fusion complete. Final shape: {tuple(combined_feat.shape)}")
         return combined_feat.to(features_list[0].dtype)
 
     def forward(self, x, e, seq_lens, grid_sizes, freqs, context, context_lens):
@@ -426,7 +434,9 @@ class FreeLongPlusPlusWanAttentionBlock(WanAttentionBlock):
                 window_val = int(self.native_length * alpha) // 2
                 window = (window_val, window_val)
 
+            logging.info(f"[FreeLong++] Running branch with alpha={alpha}, window={window}")
             branch_features = self.self_attn.forward(normed_x, seq_lens, grid_sizes, freqs, window_size=window)
+            logging.info(f"[FreeLong++] Branch alpha={alpha} produced features of shape: {tuple(branch_features.shape)}")
             features_from_branches.append(branch_features)
 
         # --- Multi-Band Spectral Fusion ---
