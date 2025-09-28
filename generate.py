@@ -12,6 +12,7 @@ import random
 
 import torch
 import torch.distributed as dist
+from wan.device_utils import get_optimal_device, get_current_device
 from PIL import Image
 
 import wan
@@ -243,6 +244,12 @@ def _parse_args():
         type=float,
         default=5.0,
         help="Classifier free guidance scale.")
+    parser.add_argument(
+        "--use_freelong",
+        action="store_true",
+        default=False,
+        help="Enable FreeLong++ for long video generation. This will override the default task config."
+    )
 
     args = parser.parse_args()
 
@@ -267,7 +274,15 @@ def generate(args):
     rank = int(os.getenv("RANK", 0))
     world_size = int(os.getenv("WORLD_SIZE", 1))
     local_rank = int(os.getenv("LOCAL_RANK", 0))
-    device = local_rank
+    # Initialize device
+    if world_size > 1 and torch.cuda.is_available():
+        # For multi-GPU, use CUDA
+        device = local_rank
+        torch.cuda.set_device(device)
+    else:
+        # For single device, use optimal available device (MPS or CPU)
+        device = get_optimal_device()
+        
     _init_logging(rank)
 
     if args.offload_model is None:
@@ -275,7 +290,8 @@ def generate(args):
         logging.info(
             f"offload_model is not specified, set to {args.offload_model}.")
     if world_size > 1:
-        torch.cuda.set_device(local_rank)
+        if not torch.cuda.is_available():
+            raise RuntimeError("Distributed training is only supported with CUDA devices")
         dist.init_process_group(
             backend="nccl",
             init_method="env://",
@@ -318,7 +334,29 @@ def generate(args):
             raise NotImplementedError(
                 f"Unsupport prompt_extend_method: {args.prompt_extend_method}")
 
-    cfg = WAN_CONFIGS[args.task]
+    # Build config, optionally enabling FreeLong++
+    if args.use_freelong:
+        logging.info("FreeLong++ mode enabled. Preparing dynamic configuration.")
+        # Start with the base config for the selected task
+        cfg = WAN_CONFIGS[args.task].copy()
+
+        # Define the multi-band scales based on desired output length
+        if args.frame_num > 500:  # 8x generation (e.g., 648 frames)
+            alphas = [1, 2, 4, "global"]
+        elif args.frame_num > 200:  # 4x generation (e.g., 324 frames)
+            alphas = [1, 2, "global"]
+        else:  # 2x generation or less
+            alphas = [1, "global"]
+
+        logging.info(f"Generating {args.frame_num} frames. Using FreeLong++ alphas: {alphas}")
+
+        # Inject the FreeLong++ configuration into the model config object
+        cfg['freelong_cfg'] = {
+            "alphas": alphas,
+            "native_length": 81,
+        }
+    else:
+        cfg = WAN_CONFIGS[args.task]
     if args.ulysses_size > 1:
         assert cfg.num_heads % args.ulysses_size == 0, f"`{cfg.num_heads=}` cannot be divided evenly by `{args.ulysses_size=}`."
 

@@ -469,20 +469,22 @@ def umt5_xxl(**kwargs):
     return _t5('umt5-xxl', **cfg)
 
 
+from ..device_utils import get_optimal_device, get_current_device
+
 class T5EncoderModel:
 
     def __init__(
         self,
         text_len,
         dtype=torch.bfloat16,
-        device=torch.cuda.current_device(),
+        device=None,
         checkpoint_path=None,
         tokenizer_path=None,
         shard_fn=None,
     ):
         self.text_len = text_len
         self.dtype = dtype
-        self.device = device
+        self.device = device if device is not None else get_optimal_device()
         self.checkpoint_path = checkpoint_path
         self.tokenizer_path = tokenizer_path
 

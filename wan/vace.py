@@ -32,6 +32,7 @@ from .text2video import (
     shard_model,
 )
 from .utils.vace_processor import VaceVideoProcessor
+from .device_utils import get_optimal_device
 
 
 class WanVace(WanT2V):
@@ -68,15 +69,33 @@ class WanVace(WanT2V):
             t5_cpu (`bool`, *optional*, defaults to False):
                 Whether to place T5 model on CPU. Only works without t5_fsdp.
         """
-        self.device = torch.device(f"cuda:{device_id}")
+        # Determine device: accept either an int CUDA index or a torch.device
+        if isinstance(device_id, torch.device):
+            self.device = device_id
+        else:
+            # device_id is expected to be an int index for CUDA when available
+            if torch.cuda.is_available():
+                self.device = torch.device(f"cuda:{int(device_id)}")
+            elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+                self.device = torch.device('mps')
+            else:
+                self.device = torch.device('cpu')
         self.config = config
         self.rank = rank
         self.t5_cpu = t5_cpu
 
         self.num_train_timesteps = config.num_train_timesteps
+        # Normalize param dtype per backend (MPS prefers float16 to save RAM)
         self.param_dtype = config.param_dtype
+        if self.device.type == 'mps':
+            self.param_dtype = torch.float16
 
         shard_fn = partial(shard_model, device_id=device_id)
+        # On MPS, keep T5 on CPU to avoid dtype/backend issues unless explicitly set to CPU already
+        if self.device.type == 'mps' and not t5_cpu:
+            logging.info("MPS detected: keeping T5 encoder on CPU for stability.")
+            self.t5_cpu = True
+
         self.text_encoder = T5EncoderModel(
             text_len=config.text_len,
             dtype=config.t5_dtype,
@@ -92,7 +111,13 @@ class WanVace(WanT2V):
             device=self.device)
 
         logging.info(f"Creating VaceWanModel from {checkpoint_dir}")
-        self.model = VaceWanModel.from_pretrained(checkpoint_dir)
+        # Load weights without meta tensors to allow .to() afterwards
+        load_dtype = self.param_dtype if self.device.type != 'mps' else torch.float16
+        self.model = VaceWanModel.from_pretrained(
+            checkpoint_dir,
+            torch_dtype=load_dtype,
+            low_cpu_mem_usage=False,
+        )
         self.model.eval().requires_grad_(False)
 
         if use_usp:
@@ -397,7 +422,8 @@ class WanVace(WanT2V):
         no_sync = getattr(self.model, 'no_sync', noop_no_sync)
 
         # evaluation mode
-        with amp.autocast(dtype=self.param_dtype), torch.no_grad(), no_sync():
+        # Use device-aware autocast for single-process path
+        with torch.autocast(device_type=self.device.type, dtype=self.param_dtype), torch.no_grad(), no_sync():
 
             if sample_solver == 'unipc':
                 sample_scheduler = FlowUniPCMultistepScheduler(
@@ -460,7 +486,11 @@ class WanVace(WanT2V):
             x0 = latents
             if offload_model:
                 self.model.cpu()
-                torch.cuda.empty_cache()
+                # Empty cache per backend
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                elif hasattr(torch, 'mps') and hasattr(torch.mps, 'empty_cache'):
+                    torch.mps.empty_cache()
             if self.rank == 0:
                 videos = self.decode_latent(x0, input_ref_images)
 
@@ -468,7 +498,11 @@ class WanVace(WanT2V):
         del sample_scheduler
         if offload_model:
             gc.collect()
-            torch.cuda.synchronize()
+            # Synchronize if backend supports it
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            elif hasattr(torch, 'mps') and hasattr(torch.mps, 'synchronize'):
+                torch.mps.synchronize()
         if dist.is_initialized():
             dist.barrier()
 

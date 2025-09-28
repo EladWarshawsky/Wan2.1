@@ -7,7 +7,9 @@ import torch.nn as nn
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.models.modeling_utils import ModelMixin
 
-from .attention import flash_attention
+from .attention import attention as attention_impl
+from .freelong_utils import create_band_pass_filters
+from einops import rearrange
 
 __all__ = ['WanModel']
 
@@ -127,14 +129,18 @@ class WanSelfAttention(nn.Module):
         self.norm_q = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
         self.norm_k = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
 
-    def forward(self, x, seq_lens, grid_sizes, freqs):
+    def forward(self, x, seq_lens, grid_sizes, freqs, window_size=None):
         r"""
         Args:
             x(Tensor): Shape [B, L, num_heads, C / num_heads]
             seq_lens(Tensor): Shape [B]
             grid_sizes(Tensor): Shape [B, 3], the second dimension contains (F, H, W)
             freqs(Tensor): Rope freqs, shape [1024, C / num_heads / 2]
+            window_size(tuple, optional): The window size for attention. Defaults to self.window_size.
         """
+        if window_size is None:
+            window_size = self.window_size
+
         b, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
 
         # query, key, value function
@@ -146,12 +152,39 @@ class WanSelfAttention(nn.Module):
 
         q, k, v = qkv_fn(x)
 
-        x = flash_attention(
-            q=rope_apply(q, grid_sizes, freqs),
-            k=rope_apply(k, grid_sizes, freqs),
+        # Apply rotary embeddings before any sparsification
+        q_rope = rope_apply(q, grid_sizes, freqs)
+        k_rope = rope_apply(k, grid_sizes, freqs)
+
+        # --- Sparse Key Frames logic for global attention on long videos ---
+        # Heuristic to detect long video generation for sparsity
+        is_long_video = grid_sizes[0, 0] > 81
+        k_lens_arg = seq_lens
+        if window_size == (-1, -1) and is_long_video:
+            num_frames = int(grid_sizes[0, 0].item())
+            num_tokens_per_frame = int(grid_sizes[0, 1].item() * grid_sizes[0, 2].item())
+
+            key_frame_indices = torch.arange(0, num_frames, 2, device=x.device)
+            sparse_indices = []
+            for idx in key_frame_indices:
+                start = int(idx.item()) * num_tokens_per_frame
+                end = start + num_tokens_per_frame
+                sparse_indices.append(torch.arange(start, end, device=x.device))
+            if len(sparse_indices) > 0:
+                sparse_indices = torch.cat(sparse_indices)
+                k_rope = k_rope[:, sparse_indices, :, :]
+                v = v[:, sparse_indices, :, :]
+                # k_lens must reflect K length; setting None lets attention_impl handle varlen
+                k_lens_arg = None
+
+        attn_dtype = torch.bfloat16 if x.device.type == 'cuda' else torch.float16
+        x = attention_impl(
+            q=q_rope,
+            k=k_rope,
             v=v,
-            k_lens=seq_lens,
-            window_size=self.window_size)
+            k_lens=k_lens_arg,
+            window_size=window_size,
+            dtype=attn_dtype)
 
         # output
         x = x.flatten(2)
@@ -176,7 +209,8 @@ class WanT2VCrossAttention(WanSelfAttention):
         v = self.v(context).view(b, -1, n, d)
 
         # compute attention
-        x = flash_attention(q, k, v, k_lens=context_lens)
+        attn_dtype = torch.bfloat16 if x.device.type == 'cuda' else torch.float16
+        x = attention_impl(q, k, v, k_lens=context_lens, dtype=attn_dtype)
 
         # output
         x = x.flatten(2)
@@ -217,9 +251,10 @@ class WanI2VCrossAttention(WanSelfAttention):
         v = self.v(context).view(b, -1, n, d)
         k_img = self.norm_k_img(self.k_img(context_img)).view(b, -1, n, d)
         v_img = self.v_img(context_img).view(b, -1, n, d)
-        img_x = flash_attention(q, k_img, v_img, k_lens=None)
+        attn_dtype = torch.bfloat16 if x.device.type == 'cuda' else torch.float16
+        img_x = attention_impl(q, k_img, v_img, k_lens=None, dtype=attn_dtype)
         # compute attention
-        x = flash_attention(q, k, v, k_lens=context_lens)
+        x = attention_impl(q, k, v, k_lens=context_lens, dtype=attn_dtype)
 
         # output
         x = x.flatten(2)
@@ -317,6 +352,98 @@ class WanAttentionBlock(nn.Module):
         return x
 
 
+class FreeLongPlusPlusWanAttentionBlock(WanAttentionBlock):
+
+    def __init__(self, *args, **kwargs):
+        # Pop FreeLong++ specific configs before calling the parent constructor
+        self.alphas = kwargs.pop("alphas", [1, "global"])
+        self.native_length = kwargs.pop("native_length", 81)
+        super().__init__(*args, **kwargs)
+        self.band_pass_filters = None  # Lazily initialized
+
+    def _get_or_create_filters(self, shape, device):
+        # Lazy initialization of filters once we know the tensor shape at runtime
+        if self.band_pass_filters is None:
+            # The shape for filters is temporal and spatial (T, H, W)
+            filter_shape = (shape[2], shape[3], shape[4])
+            self.band_pass_filters = create_band_pass_filters(filter_shape, self.alphas)
+
+        # Move filters to the correct device and ensure they are float32 for FFT
+        return {k: v.to(device, dtype=torch.float32) for k, v in self.band_pass_filters.items()}
+
+    def multi_band_spectral_fusion(self, features_list, grid_sizes):
+        b, l, c = features_list[0].shape
+        f, h, w = grid_sizes[0].tolist()
+
+        fused_spectral = torch.zeros((b, c, f, h, w), device=features_list[0].device, dtype=torch.complex64)
+
+        for i, features in enumerate(features_list):
+            # Reshape from flattened tokens to 3D video volume
+            video_features = rearrange(features, 'b (f h w) c -> b c f h w', f=f, h=h, w=w)
+
+            # Lazily get filters with the correct shape and device
+            filters = self._get_or_create_filters(video_features.shape, video_features.device)
+
+            # 1. Apply 3D FFT
+            spectral_features = torch.fft.fftn(video_features.to(torch.float32), dim=(-3, -2, -1))
+            spectral_features = torch.fft.fftshift(spectral_features, dim=(-3, -2, -1))
+
+            # 2. Select the correct band-pass filter for this branch
+            alpha_key = self.alphas[i]
+            # The smallest numeric alpha corresponds to the highest frequency band
+            smallest_numeric_alpha = min(a for a in self.alphas if isinstance(a, int)) if any(isinstance(a, int) for a in self.alphas) else None
+            filter_key = alpha_key if not isinstance(alpha_key, int) else alpha_key
+            if smallest_numeric_alpha is not None and isinstance(alpha_key, int) and alpha_key == smallest_numeric_alpha:
+                filter_key = smallest_numeric_alpha
+
+            band_pass_filter = filters[filter_key]
+
+            # 3. Apply filter and accumulate in the frequency domain
+            fused_spectral += spectral_features * band_pass_filter
+
+        # 4. Apply inverse 3D FFT once on the combined spectrum
+        fused_spectral = torch.fft.ifftshift(fused_spectral, dim=(-3, -2, -1))
+        combined_video = torch.fft.ifftn(fused_spectral, dim=(-3, -2, -1)).real
+
+        # Reshape back to the model's expected flattened format
+        combined_feat = rearrange(combined_video, 'b c f h w -> b (f h w) c')
+        return combined_feat.to(features_list[0].dtype)
+
+    def forward(self, x, e, seq_lens, grid_sizes, freqs, context, context_lens):
+        # Modulation logic from the parent class
+        with amp.autocast(dtype=torch.float32):
+            e_chunks = (self.modulation + e).chunk(6, dim=1)
+
+        normed_x = self.norm1(x).float() * (1 + e_chunks[1]) + e_chunks[0]
+
+        # --- Multi-Scale Attention Decoupling ---
+        features_from_branches = []
+        for alpha in self.alphas:
+            if alpha == "global":
+                window = (-1, -1)
+            else:
+                # Calculate window size (left, right)
+                window_val = int(self.native_length * alpha) // 2
+                window = (window_val, window_val)
+
+            branch_features = self.self_attn.forward(normed_x, seq_lens, grid_sizes, freqs, window_size=window)
+            features_from_branches.append(branch_features)
+
+        # --- Multi-Band Spectral Fusion ---
+        combined_feat = self.multi_band_spectral_fusion(features_from_branches, grid_sizes)
+
+        with amp.autocast(dtype=torch.float32):
+            x = x + combined_feat * e_chunks[2]
+
+        # --- Cross-Attention & FFN (reusing parent class logic) ---
+        x = x + self.cross_attn(self.norm3(x), context, context_lens)
+        y = self.ffn(self.norm2(x).float() * (1 + e_chunks[4]) + e_chunks[3])
+        with amp.autocast(dtype=torch.float32):
+            x = x + y * e_chunks[5]
+
+        return x
+
+
 class Head(nn.Module):
 
     def __init__(self, dim, out_dim, patch_size, eps=1e-6):
@@ -395,7 +522,8 @@ class WanModel(ModelMixin, ConfigMixin):
                  window_size=(-1, -1),
                  qk_norm=True,
                  cross_attn_norm=True,
-                 eps=1e-6):
+                 eps=1e-6,
+                 freelong_cfg=None):
         r"""
         Initialize the diffusion model backbone.
 
@@ -465,10 +593,36 @@ class WanModel(ModelMixin, ConfigMixin):
 
         # blocks
         cross_attn_type = 't2v_cross_attn' if model_type == 't2v' else 'i2v_cross_attn'
+
+        if freelong_cfg:
+            print("INFO: Initializing WanModel with FreeLongPlusPlusWanAttentionBlock.")
+            block_class = FreeLongPlusPlusWanAttentionBlock
+            block_kwargs = {
+                **freelong_cfg,
+                "cross_attn_type": cross_attn_type,
+                "dim": dim,
+                "ffn_dim": ffn_dim,
+                "num_heads": num_heads,
+                "window_size": window_size,
+                "qk_norm": qk_norm,
+                "cross_attn_norm": cross_attn_norm,
+                "eps": eps,
+            }
+        else:
+            block_class = WanAttentionBlock
+            block_kwargs = {
+                "cross_attn_type": cross_attn_type,
+                "dim": dim,
+                "ffn_dim": ffn_dim,
+                "num_heads": num_heads,
+                "window_size": window_size,
+                "qk_norm": qk_norm,
+                "cross_attn_norm": cross_attn_norm,
+                "eps": eps,
+            }
+
         self.blocks = nn.ModuleList([
-            WanAttentionBlock(cross_attn_type, dim, ffn_dim, num_heads,
-                              window_size, qk_norm, cross_attn_norm, eps)
-            for _ in range(num_layers)
+            block_class(**block_kwargs) for _ in range(num_layers)
         ])
 
         # head
