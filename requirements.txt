@@ -11,7 +11,8 @@ easydict
 ftfy
 dashscope
 imageio-ffmpeg
-# flash_attn
+#flash_attn --no-deps has to be in terminal idk 
+huggingface_hub[cli]
 gradio>=5.0.0
 numpy>=1.23.5,<2
 einops

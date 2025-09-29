@@ -424,10 +424,17 @@ def generate(args):
             logging.info(f"Extended prompt: {args.prompt}")
 
         logging.info("Creating WanT2V pipeline.")
+        # Get device ID from torch.device object or string
+        if hasattr(device, 'index') and device.index is not None:
+            device_id = device.index
+        elif isinstance(device, str) and ':' in device:
+            device_id = int(device.split(':')[-1])
+        else:
+            device_id = 0  # Default to 0 if no device index is found
         wan_t2v = wan.WanT2V(
             config=cfg,
             checkpoint_dir=args.ckpt_dir,
-            device_id=device,
+            device_id=device_id,
             rank=rank,
             t5_fsdp=args.t5_fsdp,
             dit_fsdp=args.dit_fsdp,
