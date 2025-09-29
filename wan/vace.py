@@ -422,8 +422,9 @@ class WanVace(WanT2V):
         no_sync = getattr(self.model, 'no_sync', noop_no_sync)
 
         # evaluation mode
-        # Use device-aware autocast for single-process path
-        with torch.autocast(device_type=self.device.type, dtype=self.param_dtype), torch.no_grad(), no_sync():
+        # Ensure model is on device once before the loop; use inference_mode + autocast
+        self.model.to(self.device)
+        with torch.inference_mode(), torch.autocast(device_type=self.device.type, dtype=self.param_dtype), no_sync():
 
             if sample_solver == 'unipc':
                 sample_scheduler = FlowUniPCMultistepScheduler(
@@ -458,7 +459,6 @@ class WanVace(WanT2V):
 
                 timestep = torch.stack(timestep)
 
-                self.model.to(self.device)
                 noise_pred_cond = self.model(
                     latent_model_input,
                     t=timestep,
@@ -719,9 +719,9 @@ class WanVaceMP(WanVace):
 
                 no_sync = getattr(model, 'no_sync', noop_no_sync)
 
-                # evaluation mode
-                with amp.autocast(
-                        dtype=param_dtype), torch.no_grad(), no_sync():
+                # evaluation mode: keep model on device once; use inference_mode + autocast
+                model.to(gpu)
+                with torch.inference_mode(), amp.autocast(dtype=param_dtype), no_sync():
 
                     if sample_solver == 'unipc':
                         sample_scheduler = FlowUniPCMultistepScheduler(
@@ -757,7 +757,6 @@ class WanVaceMP(WanVace):
 
                         timestep = torch.stack(timestep)
 
-                        model.to(gpu)
                         noise_pred_cond = model(
                             latent_model_input,
                             t=timestep,
