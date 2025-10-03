@@ -11,7 +11,8 @@ easydict
 ftfy
 dashscope
 imageio-ffmpeg
-#flash_attn --no-deps has to be in terminal idk 
+#flash_attn --no-build-isolation  has to be in terminal
+#decord should be installed as well it's just not compatible with mac at the moment, but is necessary 
 huggingface_hub[cli]
 gradio>=5.0.0
 numpy>=1.23.5,<2
