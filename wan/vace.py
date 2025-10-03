@@ -113,11 +113,53 @@ class WanVace(WanT2V):
         logging.info(f"Creating VaceWanModel from {checkpoint_dir}")
         # Load weights without meta tensors to allow .to() afterwards
         load_dtype = self.param_dtype if self.device.type != 'mps' else torch.float16
-        self.model = VaceWanModel.from_pretrained(
-            checkpoint_dir,
-            torch_dtype=load_dtype,
-            low_cpu_mem_usage=False,
-        )
+        
+        # First load the base T2V model weights
+        base_t2v_path = os.path.join(checkpoint_dir, "wan2.1_t2v_1.3B_fp16.safetensors")
+        vace_weights_path = os.path.join(checkpoint_dir, "diffusion_pytorch_model.safetensors")
+        
+        if os.path.exists(base_t2v_path) and os.path.exists(vace_weights_path):
+            logging.info("Loading VACE model with base T2V weights + VACE-specific weights")
+            
+            # Create model from config without loading weights
+            self.model = VaceWanModel.from_config(checkpoint_dir)
+            self.model.to(dtype=load_dtype)
+            
+            # Load base T2V weights first
+            from safetensors import safe_open
+            
+            base_state_dict = {}
+            with safe_open(base_t2v_path, framework="pt") as f:
+                for key in f.keys():
+                    # Remove the 'model.diffusion_model.' prefix to match VaceWanModel structure
+                    if key.startswith("model.diffusion_model."):
+                        new_key = key[len("model.diffusion_model."):]
+                        base_state_dict[new_key] = f.get_tensor(key)
+            
+            # Load base T2V weights
+            missing_keys, unexpected_keys = self.model.load_state_dict(base_state_dict, strict=False)
+            logging.info(f"Loaded {len(base_state_dict)} base T2V weights, {len(missing_keys)} missing keys")
+            
+            # Load VACE-specific weights
+            vace_state_dict = {}
+            with safe_open(vace_weights_path, framework="pt") as f:
+                for key in f.keys():
+                    # Skip the model_type key as it's not needed
+                    if key != "model_type.VACE_1_3B":
+                        vace_state_dict[key] = f.get_tensor(key)
+            
+            # Load VACE-specific weights
+            missing_keys, unexpected_keys = self.model.load_state_dict(vace_state_dict, strict=False)
+            logging.info(f"Loaded {len(vace_state_dict)} VACE-specific weights, {len(missing_keys)} missing keys")
+                
+        else:
+            logging.info("Loading VACE model from standard checkpoint")
+            self.model = VaceWanModel.from_pretrained(
+                checkpoint_dir,
+                torch_dtype=load_dtype,
+                low_cpu_mem_usage=False,
+            )
+        
         self.model.eval().requires_grad_(False)
 
         if use_usp:
@@ -639,7 +681,48 @@ class WanVaceMP(WanVace):
                                      self.config.vae_checkpoint),
                 device=gpu)
             logging.info(f"Creating VaceWanModel from {self.checkpoint_dir}")
-            model = VaceWanModel.from_pretrained(self.checkpoint_dir)
+            
+            # First load the base T2V model weights
+            base_t2v_path = os.path.join(self.checkpoint_dir, "wan2.1_t2v_1.3B_fp16.safetensors")
+            vace_weights_path = os.path.join(self.checkpoint_dir, "diffusion_pytorch_model.safetensors")
+            
+            if os.path.exists(base_t2v_path) and os.path.exists(vace_weights_path):
+                logging.info("Loading VACE model with base T2V weights + VACE-specific weights")
+                
+                # Create model from config without loading weights
+                model = VaceWanModel.from_config(self.checkpoint_dir)
+                
+                # Load base T2V weights first
+                from safetensors import safe_open
+                
+                base_state_dict = {}
+                with safe_open(base_t2v_path, framework="pt") as f:
+                    for key in f.keys():
+                        # Remove the 'model.diffusion_model.' prefix to match VaceWanModel structure
+                        if key.startswith("model.diffusion_model."):
+                            new_key = key[len("model.diffusion_model."):]
+                            base_state_dict[new_key] = f.get_tensor(key)
+                
+                # Load base T2V weights
+                missing_keys, unexpected_keys = model.load_state_dict(base_state_dict, strict=False)
+                logging.info(f"Loaded {len(base_state_dict)} base T2V weights, {len(missing_keys)} missing keys")
+                
+                # Load VACE-specific weights
+                vace_state_dict = {}
+                with safe_open(vace_weights_path, framework="pt") as f:
+                    for key in f.keys():
+                        # Skip the model_type key as it's not needed
+                        if key != "model_type.VACE_1_3B":
+                            vace_state_dict[key] = f.get_tensor(key)
+                
+                # Load VACE-specific weights
+                missing_keys, unexpected_keys = model.load_state_dict(vace_state_dict, strict=False)
+                logging.info(f"Loaded {len(vace_state_dict)} VACE-specific weights, {len(missing_keys)} missing keys")
+            
+            else:
+                logging.info("Loading VACE model from standard checkpoint")
+                model = VaceWanModel.from_pretrained(self.checkpoint_dir)
+            
             model.eval().requires_grad_(False)
 
             if self.use_usp:

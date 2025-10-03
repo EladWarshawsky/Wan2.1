@@ -243,32 +243,63 @@ class VaceVideoProcessor(object):
                          seed=2024,
                          **kwargs):
         rng = np.random.default_rng(seed + hash(data_key_batch[0]) % 10000)
-        # read video
-        import decord
-        decord.bridge.set_bridge('torch')
-        readers = []
-        for data_k in data_key_batch:
-            reader = decord.VideoReader(data_k)
-            readers.append(reader)
+        # read video with fallback mechanism
+        try:
+            import decord
+            decord.bridge.set_bridge('torch')
+            readers = []
+            for data_k in data_key_batch:
+                reader = decord.VideoReader(data_k)
+                readers.append(reader)
 
-        fps = readers[0].get_avg_fps()
-        length = min([len(r) for r in readers])
-        frame_timestamps = [
-            readers[0].get_frame_timestamp(i) for i in range(length)
-        ]
-        frame_timestamps = np.array(frame_timestamps, dtype=np.float32)
-        h, w = readers[0].next().shape[:2]
-        frame_ids, (x1, x2, y1, y2), (oh, ow), fps = self._get_frameid_bbox(
-            fps, frame_timestamps, h, w, crop_box, rng)
+            fps = readers[0].get_avg_fps()
+            length = min([len(r) for r in readers])
+            frame_timestamps = [
+                readers[0].get_frame_timestamp(i) for i in range(length)
+            ]
+            frame_timestamps = np.array(frame_timestamps, dtype=np.float32)
+            h, w = readers[0].next().shape[:2]
+            frame_ids, (x1, x2, y1, y2), (oh, ow), fps = self._get_frameid_bbox(
+                fps, frame_timestamps, h, w, crop_box, rng)
 
-        # preprocess video
-        videos = [
-            reader.get_batch(frame_ids)[:, y1:y2, x1:x2, :]
-            for reader in readers
-        ]
-        videos = [self._video_preprocess(video, oh, ow) for video in videos]
-        return *videos, frame_ids, (oh, ow), fps
-        # return videos if len(videos) > 1 else videos[0]
+            # preprocess video
+            videos = [
+                reader.get_batch(frame_ids)[:, y1:y2, x1:x2, :]
+                for reader in readers
+            ]
+            videos = [self._video_preprocess(video, oh, ow) for video in videos]
+            return *videos, frame_ids, (oh, ow), fps
+        
+        except ImportError:
+            # Fallback to torchvision if decord is not available
+            print("Warning: decord not available, falling back to torchvision for video reading")
+            import torchvision.io as tv_io
+            
+            # Read videos using torchvision
+            video_data = []
+            for data_k in data_key_batch:
+                video, audio, info = tv_io.read_video(data_k, output_format="TCHW")
+                video_data.append((video, info))
+            
+            # Use the first video for metadata
+            fps = video_data[0][1]['video_fps']
+            length = len(video_data[0][0])
+            frame_timestamps = np.arange(length) / fps
+            h, w = video_data[0][0].shape[2], video_data[0][0].shape[3]
+            frame_ids, (x1, x2, y1, y2), (oh, ow), fps = self._get_frameid_bbox(
+                fps, frame_timestamps, h, w, crop_box, rng)
+            
+            # Extract and process frames
+            videos = []
+            for video, info in video_data:
+                frames = video[frame_ids]  # Select frames
+                frames = frames[:, :, y1:y2, x1:x2]  # Crop frames
+                # Convert to numpy for preprocessing
+                frames = frames.permute(0, 2, 3, 1).numpy()
+                frames = self._video_preprocess(torch.from_numpy(frames), oh, ow)
+                videos.append(frames)
+            
+            return *videos, frame_ids, (oh, ow), fps
 
 
 def prepare_source(src_video, src_mask, src_ref_images, num_frames, image_size,
