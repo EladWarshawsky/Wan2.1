@@ -184,8 +184,14 @@ class VaceVideoProcessor(object):
             axis=1).tolist()
         return frame_ids, (x1, x2, y1, y2), (oh, ow), target_fps
 
-    def _get_frameid_bbox_adjust_last(self, fps, frame_timestamps, h, w,
-                                      crop_box, rng):
+    def _get_frameid_bbox_adjust_last(self,
+                                      fps,
+                                      frame_timestamps,
+                                      h,
+                                      w,
+                                      crop_box,
+                                      rng,
+                                      num_frames=None):
         duration = frame_timestamps[-1].mean()
         x1, x2, y1, y2 = [0, w, 0, h] if crop_box is None else crop_box
         h, w = y2 - y1, x2 - x1
@@ -194,8 +200,13 @@ class VaceVideoProcessor(object):
 
         area_z = min(self.seq_len, self.max_area / (dh * dw),
                      (h // dh) * (w // dw))
-        of = min((len(frame_timestamps) - 1) // df + 1,
-                 int(self.seq_len / area_z))
+        if num_frames and num_frames > ((len(frame_timestamps) - 1) // df + 1):
+            print(
+                f"[INFO] Using requested frame_num: {num_frames} for long video generation.")
+            of = (num_frames - 1) // df + 1
+        else:
+            of = min((len(frame_timestamps) - 1) // df + 1,
+                     int(self.seq_len / area_z))
 
         # deduce target shape of the [latent video]
         target_area_z = min(area_z, int(self.seq_len / of))
@@ -216,10 +227,18 @@ class VaceVideoProcessor(object):
         # print(oh, ow, of, target_duration, target_fps, len(frame_timestamps), len(frame_ids))
         return frame_ids, (x1, x2, y1, y2), (oh, ow), target_fps
 
-    def _get_frameid_bbox(self, fps, frame_timestamps, h, w, crop_box, rng):
+    def _get_frameid_bbox(self,
+                          fps,
+                          frame_timestamps,
+                          h,
+                          w,
+                          crop_box,
+                          rng,
+                          num_frames=None):
         if self.keep_last:
             return self._get_frameid_bbox_adjust_last(fps, frame_timestamps, h,
-                                                      w, crop_box, rng)
+                                                      w, crop_box, rng,
+                                                      num_frames=num_frames)
         else:
             return self._get_frameid_bbox_default(fps, frame_timestamps, h, w,
                                                   crop_box, rng)
@@ -241,6 +260,7 @@ class VaceVideoProcessor(object):
                          *data_key_batch,
                          crop_box=None,
                          seed=2024,
+                         num_frames=None,
                          **kwargs):
         rng = np.random.default_rng(seed + hash(data_key_batch[0]) % 10000)
         # read video with fallback mechanism
@@ -260,7 +280,13 @@ class VaceVideoProcessor(object):
             frame_timestamps = np.array(frame_timestamps, dtype=np.float32)
             h, w = readers[0].next().shape[:2]
             frame_ids, (x1, x2, y1, y2), (oh, ow), fps = self._get_frameid_bbox(
-                fps, frame_timestamps, h, w, crop_box, rng)
+                fps,
+                frame_timestamps,
+                h,
+                w,
+                crop_box,
+                rng,
+                num_frames=num_frames)
 
             # preprocess video
             videos = [
@@ -287,7 +313,13 @@ class VaceVideoProcessor(object):
             frame_timestamps = np.arange(length) / fps
             h, w = video_data[0][0].shape[2], video_data[0][0].shape[3]
             frame_ids, (x1, x2, y1, y2), (oh, ow), fps = self._get_frameid_bbox(
-                fps, frame_timestamps, h, w, crop_box, rng)
+                fps,
+                frame_timestamps,
+                h,
+                w,
+                crop_box,
+                rng,
+                num_frames=num_frames)
             
             # Extract and process frames
             videos = []

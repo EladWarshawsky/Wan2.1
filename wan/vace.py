@@ -295,7 +295,9 @@ class WanVace(WanT2V):
             if sub_src_mask is not None and sub_src_video is not None:
                 src_video[i], src_mask[
                     i], _, _, _ = self.vid_proc.load_video_pair(
-                        sub_src_video, sub_src_mask)
+                        sub_src_video,
+                        sub_src_mask,
+                        num_frames=num_frames)
                 src_video[i] = src_video[i].to(device)
                 src_mask[i] = src_mask[i].to(device)
                 src_mask[i] = torch.clamp(
@@ -308,7 +310,8 @@ class WanVace(WanT2V):
                 src_mask[i] = torch.ones_like(src_video[i], device=device)
                 image_sizes.append(image_size)
             else:
-                src_video[i], _, _, _ = self.vid_proc.load_video(sub_src_video)
+                src_video[i], _, _, _ = self.vid_proc.load_video(
+                    sub_src_video, num_frames=num_frames)
                 src_video[i] = src_video[i].to(device)
                 src_mask[i] = torch.ones_like(src_video[i], device=device)
                 image_sizes.append(src_video[i].shape[2:])
