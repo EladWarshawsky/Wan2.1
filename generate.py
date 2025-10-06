@@ -29,6 +29,7 @@ import wan
 from wan.configs import MAX_AREA_CONFIGS, SIZE_CONFIGS, SUPPORTED_SIZES, WAN_CONFIGS
 from wan.utils.prompt_extend import DashScopePromptExpander, QwenPromptExpander
 from wan.utils.utils import cache_image, cache_video, str2bool
+from wan.lora_utils import load_lora_weights
 
 
 EXAMPLE_PROMPT = {
@@ -278,6 +279,13 @@ def _parse_args():
         action="store_true",
         default=False,
         help="Enable FreeLong++ for long video generation. This will override the default task config."
+    )
+
+    parser.add_argument(
+        "--lora_path",
+        type=str,
+        default=None,
+        help="Path to a LoRA .safetensors file to apply to the model."
     )
 
     # Disable token budget for VACE (long control videos at native resolution)
@@ -613,6 +621,12 @@ def generate(args):
             t5_cpu=args.t5_cpu,
             disable_token_budget=args.no_token_budget,
         )
+
+        # Apply LoRA weights if provided (main process only)
+        if args.lora_path:
+            if rank == 0:
+                logging.info(f"Applying LoRA from {args.lora_path} to VACE model")
+                wan_vace.model = load_lora_weights(wan_vace.model, args.lora_path)
 
         src_video, src_mask, src_ref_images = wan_vace.prepare_source(
             [args.src_video], [args.src_mask], [
