@@ -280,6 +280,14 @@ def _parse_args():
         help="Enable FreeLong++ for long video generation. This will override the default task config."
     )
 
+    # Disable token budget for VACE (long control videos at native resolution)
+    parser.add_argument(
+        "--no_token_budget",
+        action="store_true",
+        default=False,
+        help="Disable the VACE token budget, allowing long control videos at the cost of higher VRAM."
+    )
+
     args = parser.parse_args()
 
     _validate_args(args)
@@ -603,6 +611,7 @@ def generate(args):
             dit_fsdp=args.dit_fsdp,
             use_usp=(args.ulysses_size > 1 or args.ring_size > 1),
             t5_cpu=args.t5_cpu,
+            disable_token_budget=args.no_token_budget,
         )
 
         src_video, src_mask, src_ref_images = wan_vace.prepare_source(

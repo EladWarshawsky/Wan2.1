@@ -91,7 +91,7 @@ class VaceImageProcessor(object):
 class VaceVideoProcessor(object):
 
     def __init__(self, downsample, min_area, max_area, min_fps, max_fps,
-                 zero_start, seq_len, keep_last, **kwargs):
+                 zero_start, seq_len, keep_last, disable_token_budget=False, **kwargs):
         self.downsample = downsample
         self.min_area = min_area
         self.max_area = max_area
@@ -99,6 +99,7 @@ class VaceVideoProcessor(object):
         self.max_fps = max_fps
         self.zero_start = zero_start
         self.keep_last = keep_last
+        self.disable_token_budget = disable_token_budget
         self.seq_len = seq_len
         assert seq_len >= min_area / (self.downsample[1] * self.downsample[2])
 
@@ -166,7 +167,7 @@ class VaceVideoProcessor(object):
                  int(self.seq_len / area_z))
 
         # deduce target shape of the [latent video]
-        target_area_z = min(area_z, int(self.seq_len / of))
+        target_area_z = min(area_z, int(self.seq_len / of)) if not self.disable_token_budget else area_z
         oh = round(np.sqrt(target_area_z * ratio))
         ow = int(target_area_z / oh)
         of = (of - 1) * df + 1
@@ -198,15 +199,26 @@ class VaceVideoProcessor(object):
         ratio = h / w
         df, dh, dw = self.downsample
 
-        area_z = min(self.seq_len, self.max_area / (dh * dw),
-                     (h // dh) * (w // dw))
-        if num_frames and num_frames > ((len(frame_timestamps) - 1) // df + 1):
-            print(
-                f"[INFO] Using requested frame_num: {num_frames} for long video generation.")
-            of = (num_frames - 1) // df + 1
+        # Token budgeting control
+        if self.disable_token_budget:
+            # Prioritize native video resolution and full frames
+            area_z = (h // dh) * (w // dw)
+            if num_frames and num_frames > ((len(frame_timestamps) - 1) // df + 1):
+                print(
+                    f"[INFO] Using requested frame_num: {num_frames} for long video generation.")
+                of = (num_frames - 1) // df + 1
+            else:
+                of = (len(frame_timestamps) - 1) // df + 1
         else:
-            of = min((len(frame_timestamps) - 1) // df + 1,
-                     int(self.seq_len / area_z))
+            area_z = min(self.seq_len, self.max_area / (dh * dw),
+                         (h // dh) * (w // dw))
+            if num_frames and num_frames > ((len(frame_timestamps) - 1) // df + 1):
+                print(
+                    f"[INFO] Using requested frame_num: {num_frames} for long video generation.")
+                of = (num_frames - 1) // df + 1
+            else:
+                of = min((len(frame_timestamps) - 1) // df + 1,
+                         int(self.seq_len / area_z))
 
         # deduce target shape of the [latent video]
         target_area_z = min(area_z, int(self.seq_len / of))

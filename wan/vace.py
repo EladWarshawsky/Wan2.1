@@ -47,6 +47,7 @@ class WanVace(WanT2V):
         dit_fsdp=False,
         use_usp=False,
         t5_cpu=False,
+        disable_token_budget=False,
     ):
         r"""
         Initializes the Wan text-to-video generation model components.
@@ -201,7 +202,8 @@ class WanVace(WanT2V):
             max_fps=config.sample_fps,
             zero_start=True,
             seq_len=75600,
-            keep_last=True)
+            keep_last=True,
+            disable_token_budget=disable_token_budget)
 
     def vace_encode_frames(self, frames, ref_images, masks=None, vae=None):
         vae = self.vae if vae is None else vae
