@@ -1,5 +1,25 @@
 huggingface-cli download Wan-AI/Wan2.1-VACE-1.3B --local-dir ./Wan2.1-VACE-1.3B
 
+huggingface-cli download Wan-AI/Wan2.1-VACE-14B --local-dir ./Wan2.1-VACE-14B
+
 wget https://huggingface.co/Kijai/WanVideo_comfy/resolve/main/Wan21_CausVid_bidirect2_T2V_1_3B_lora_rank32.safetensors 
 
+wget https://huggingface.co/Kijai/WanVideo_comfy/resolve/main/Wan21_CausVid_14B_T2V_lora_rank32_v2.safetensors
+
 python generate.py   --task vace-1.3B   --size "832*480"   --ckpt_dir /home/ubuntu/Wan2.1-VACE-1.3B   --prompt "kids speaking in the desert"   --src_video /home/ubuntu/Wan2.1/depth_mapping.mp4   --src_ref_images /home/ubuntu/Wan2.1/translated.png --sample_steps 4  --lora_path /home/ubuntu/Wan2.1-VACE-1.3B/Wan21_CausVid_bidirect2_T2V_1_3B_lora_rank32.safetensors --no_token_budget --base_seed 123   --frame_num 272   --use_freelong   --offload_model True   --t5_cpu
+
+python generate.py \
+  --task vace-14B \
+  --size "832*480" \
+  --ckpt_dir /home/ubuntu/Wan2.1-VACE-14B \
+  --prompt "kids speaking in the desert" \
+  --src_video /home/ubuntu/Wan2.1/depth_mapping.mp4 \
+  --src_ref_images /home/ubuntu/Wan2.1/translated.png \
+  --sample_steps 4 \
+  --lora_path /home/ubuntu/Wan2.1-VACE-14B/Wan21_CausVid_14B_T2V_lora_rank32_v2.safetensors \
+  --no_token_budget \
+  --base_seed 123 \
+  --frame_num 272 \
+  --use_freelong \
+  --offload_model True \
+  --t5_cpu
